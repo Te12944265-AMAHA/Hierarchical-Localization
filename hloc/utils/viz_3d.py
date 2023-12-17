@@ -12,7 +12,10 @@ from typing import Optional
 import numpy as np
 import pycolmap
 import plotly.graph_objects as go
-
+import open3d as o3d
+import os
+from pathlib import PurePosixPath
+from tqdm import tqdm
 
 def to_homogeneous(points):
     pad = np.ones((points.shape[:-1]+(1,)), dtype=points.dtype)
@@ -31,7 +34,7 @@ def init_figure(height: int = 800) -> go.Figure:
         autorange=True,
     )
     fig.update_layout(
-        template="plotly_dark",
+        template="simple_white",
         height=height,
         scene_camera=dict(
             eye=dict(x=0., y=-.1, z=-2),
@@ -154,12 +157,14 @@ def plot_reconstruction(
         rec: pycolmap.Reconstruction,
         max_reproj_error: float = 6.0,
         color: str = 'rgb(0, 0, 255)',
+        p_color: str = 'rgb(95, 70, 50)',
         name: Optional[str] = None,
         min_track_length: int = 2,
         points: bool = True,
         cameras: bool = True,
         points_rgb: bool = True,
-        cs: float = 1.0):
+        cs: float = 1.0,
+        pcd_save_path: str = "."):
     # Filter outliers
     bbs = rec.compute_bounding_box(0.001, 0.999)
     # Filter points, use original reproj error here
@@ -168,12 +173,53 @@ def plot_reconstruction(
                             (p3D.xyz <= bbs[1]).all() and
                             p3D.error <= max_reproj_error and
                             p3D.track.length() >= min_track_length)]
-    xyzs = [p3D.xyz for p3D in p3Ds]
+    xyzs = np.array([p3D.xyz for p3D in p3Ds])
+    print("original point cloud shape:", xyzs.shape)
+    #xyzs = postprocess_pcd(xyzs, pcd_save_path, nb_points=3, radius=0.05)
+    #print("postprocessed point cloud shape:", xyzs.shape)
+    save_pcd(xyzs, pcd_save_path)
     if points_rgb:
         pcolor = [p3D.color for p3D in p3Ds]
     else:
-        pcolor = color
+        pcolor = p_color
     if points:
-        plot_points(fig, np.array(xyzs), color=pcolor, ps=1, name=name)
+        plot_points(fig, xyzs, color=pcolor, ps=1, name=name)
     if cameras:
         plot_cameras(fig, rec, color=color, legendgroup=name, size=cs)
+
+def save_cameras(rec: pycolmap.Reconstruction, save_camera_path: str = "."):
+    print(f"Saving cameras to {save_camera_path}")
+    os.makedirs(save_camera_path, exist_ok=True)
+    for image_id, image in tqdm(rec.images.items()):
+        camera = rec.cameras[image.camera_id]
+        R = image.rotmat().T
+        t = image.projection_center()
+        K = camera.calibration_matrix()
+        RT = np.zeros((3,4))
+        RT[:,:3] = R.reshape((3,3))
+        RT[:,3] = t.flatten()
+        camera_name = PurePosixPath(str(image.name)).stem
+        res_out = {
+            "K": np.array(K).astype(np.float64),
+            "RT": np.array(RT).astype(np.float64),
+        }
+        cam_matrix_save_path = os.path.join(save_camera_path, f"{camera_name}.npz")
+        np.savez(cam_matrix_save_path, **res_out)
+        
+
+def postprocess_pcd(pts_in, pcd_save_path, nb_points=7, radius=0.05):
+    """
+    [Not in use] Array of shape (n, 3)
+    """
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts_in)
+    cl, ind = pcd.remove_radius_outlier(nb_points=nb_points, radius=radius)
+    inlier_cloud = cl.select_by_index(ind)
+    o3d.io.write_point_cloud(f"{pcd_save_path}/reconstructed.ply", inlier_cloud)
+    pts_out = np.asarray(inlier_cloud.points)
+    return pts_out
+
+def save_pcd(pts_in, pcd_save_path):
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts_in)
+    o3d.io.write_point_cloud(f"{pcd_save_path}/reconstructed.pcd", pcd)
